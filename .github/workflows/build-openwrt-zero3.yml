@@ -26,7 +26,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
 
     steps:
     - name: Checkout
@@ -48,7 +48,7 @@ jobs:
         sudo -E apt-get -qq update
         sudo -E apt-get -qq install --no-install-recommends \
           ack antlr3 asciidoc autoconf automake autopoint binutils bison \
-          build-essential bzip2 ccache cmake cpio curl device-tree-compiler \
+          build-essential bzip2 ccache clang llvm lld cmake cpio curl device-tree-compiler \
           fastjar flex gawk gettext gcc-multilib g++-multilib git gperf \
           haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev \
           libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev \
@@ -65,7 +65,12 @@ jobs:
 
         sudo mkdir -p /workdir
         sudo chown "$USER:$GROUPS" /workdir
-
+    - name: Check host compiler
+      run: |
+        clang++ --version
+        printf 'int main() { return 0; }\n' \
+          | clang++ -std=c++23 -x c++ -c -o /tmp/cxx23-test.o -
+          
     - name: Clone source code
       working-directory: /workdir
       run: |
