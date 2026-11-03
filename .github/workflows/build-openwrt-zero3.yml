@@ -1,6 +1,6 @@
 #
 # Build OpenWrt firmware for Orange Pi Zero 3 (Allwinner H618)
-# Based on ImmortalWrt (built-in AW859A / UWE5622 Wi-Fi driver support)
+# Based on ImmortalWrt with AW859A / UWE5622 Wi-Fi support
 #
 
 name: Build OpenWrt Zero 3
@@ -34,7 +34,10 @@ jobs:
 
     - name: Clean up disk space
       run: |
-        sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /opt/ghc
+        sudo rm -rf /opt/hostedtoolcache/CodeQL
         sudo docker system prune -a -f
         df -h
 
@@ -53,92 +56,205 @@ jobs:
           libssl-dev libtool lrzsz mkisofs msmtp ninja-build p7zip \
           p7zip-full patch pkgconf python3 python3-pyelftools \
           python3-setuptools qemu-utils rsync scons squashfs-tools \
-          subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
+          subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd \
+          zlib1g-dev
+
         sudo -E apt-get -qq autoremove --purge
         sudo -E apt-get -qq clean
         sudo timedatectl set-timezone "$TZ"
-        sudo mkdir -p /workdir
-        sudo chown $USER:$GROUPS /workdir
 
-    - name: Clone source code (Shallow Clone)
+        sudo mkdir -p /workdir
+        sudo chown "$USER:$GROUPS" /workdir
+
+    - name: Clone source code
       working-directory: /workdir
       run: |
-        df -hT $PWD
-        git clone --depth 1 --filter=blob:none "$REPO_URL" -b "$REPO_BRANCH" openwrt
+        df -hT "$PWD"
+        git clone --depth 1 --filter=blob:none \
+          "$REPO_URL" \
+          -b "$REPO_BRANCH" \
+          openwrt
+
         ln -sf /workdir/openwrt "$GITHUB_WORKSPACE/openwrt"
 
     - name: Load custom feeds
       run: |
-        [ -e "$FEEDS_CONF" ] && mv "$FEEDS_CONF" openwrt/feeds.conf.default
+        if [ -e "$FEEDS_CONF" ]; then
+          mv "$FEEDS_CONF" openwrt/feeds.conf.default
+        fi
+
         chmod +x "$DIY_P1_SH"
+
         cd openwrt
         "$GITHUB_WORKSPACE/$DIY_P1_SH"
 
     - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
+      run: |
+        cd openwrt
+        ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
+      run: |
+        cd openwrt
+        ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e "$CONFIG_FILE" ] && mv "$CONFIG_FILE" openwrt/.config
+        if [ -e files ]; then
+          mv files openwrt/files
+        fi
+
+        if [ -e "$CONFIG_FILE" ]; then
+          mv "$CONFIG_FILE" openwrt/.config
+        fi
+
         chmod +x "$DIY_P2_SH"
+
         cd openwrt
         "$GITHUB_WORKSPACE/$DIY_P2_SH"
 
-    - name: Download package
-      id: package
+    - name: Generate final configuration
       run: |
         cd openwrt
         make defconfig
-        make download -j$(nproc) || make download -j8 V=s
-        find dl -size -1024c -delete
 
-    - name: Verify iStore deps (TAR_XZ / xz-utils guard)
+    - name: Verify requested packages
       run: |
         cd openwrt
-        echo "--- TAR_XZ / tar / xz-utils definitions ---"
-        grep -nE "^[[:space:]]*config PACKAGE_(TAR_XZ|tar|xz-utils)[[:space:]]*$" tmp/.config-package.in | head -5 || echo "no definitions"
-        echo "--- .config state ---"
-        grep -E "^CONFIG_PACKAGE_(luci-app-store|luci-app-quickstart|quickstart|xz-utils)=" .config || echo "MISSING FROM .config"
-        echo "--- is not set? ---"
-        grep -E "^# CONFIG_PACKAGE_(luci-app-store|luci-app-quickstart) is not set" .config || echo "(not listed as unset)"
 
-    - name: Verify key packages in .config
-      run: |
-        cd openwrt
         fail=0
-        for p in luci-app-store luci-app-quickstart luci-i18n-base-zh-cn; do
-          if grep -q "^CONFIG_PACKAGE_$p=y" .config; then
-            echo "OK: $p enabled"
-          elif grep -q "^# CONFIG_PACKAGE_$p is not set" .config; then
-            echo "FAIL: $p exists but was dropped by defconfig (unmet dependency):"
-            grep -A30 "^config PACKAGE_$p\$" tmp/.config-package.in | head -35
-            fail=1
+
+        required_packages="
+        luci-app-mwan3
+        luci-app-ttyd
+        luci-app-filemanager
+        luci-app-passwall
+        luci-app-passwall2
+        luci-app-diskman
+        luci-app-easytier
+        dnsmasq-full
+        chinadns-ng
+        ip-full
+        coreutils-base64
+        coreutils-nohup
+        luci-theme-argon
+        luci-app-firewall
+        luci-app-package-manager
+        kmod-uwe5622
+        uwe5622-firmware
+        wpad-basic-mbedtls
+        iw-full
+        "
+
+        for package in $required_packages; do
+          if grep -q "^CONFIG_PACKAGE_${package}=y" .config; then
+            echo "OK: ${package}"
           else
-            echo "FAIL: $p not found in package metadata (feed not installed?)"
+            echo "MISSING: ${package}"
             fail=1
           fi
         done
-        grep -q "^CONFIG_LUCI_LANG_zh_Hans=y" .config && echo "OK: LuCI zh_Hans language enabled"
-        [ "$fail" -eq 0 ] || exit 1
 
-    - name: Compile the firmware
+        if grep -q "^CONFIG_TARGET_sunxi_cortexa53_DEVICE_xunlong_orangepi-zero3=y" .config; then
+          echo "OK: Orange Pi Zero 3 target"
+        else
+          echo "MISSING: Orange Pi Zero 3 target"
+          fail=1
+        fi
+
+        if grep -q "^CONFIG_LUCI_LANG_zh_Hans=y" .config; then
+          echo "OK: Simplified Chinese LuCI language"
+        else
+          echo "MISSING: Simplified Chinese LuCI language"
+          fail=1
+        fi
+
+        translation_packages="
+        luci-i18n-mwan3-zh-cn
+        luci-i18n-ttyd-zh-cn
+        luci-i18n-passwall-zh-cn
+        luci-i18n-passwall2-zh-cn
+        luci-i18n-diskman-zh-cn
+        luci-i18n-firewall-zh-cn
+        luci-i18n-package-manager-zh-cn
+        "
+
+        for package in $translation_packages; do
+          if grep -q "^CONFIG_PACKAGE_${package}=y" .config; then
+            echo "OK translation: ${package}"
+          elif grep -q "^# CONFIG_PACKAGE_${package} is not set" .config; then
+            echo "WARNING translation dropped by defconfig: ${package}"
+          else
+            echo "WARNING translation unavailable: ${package}"
+          fi
+        done
+
+        forbidden_packages="
+        luci-app-store
+        luci-app-quickstart
+        luci-app-openclash
+        luci-app-docker
+        luci-app-dockerman
+        luci-app-aria2
+        luci-app-zerotier
+        docker
+        dockerd
+        containerd
+        runc
+        aria2
+        ariang
+        "
+
+        for package in $forbidden_packages; do
+          if grep -q "^CONFIG_PACKAGE_${package}=y" .config; then
+            echo "FORBIDDEN PACKAGE ENABLED: ${package}"
+            fail=1
+          fi
+        done
+
+        if [ "$fail" -ne 0 ]; then
+          echo "Configuration verification failed."
+          exit 1
+        fi
+
+        echo "Configuration verification passed."
+
+    - name: Download package
+      run: |
+        cd openwrt
+
+        make download -j"$(nproc)" || \
+        make download -j8 V=s
+
+        find dl -size -1024c -delete
+
+    - name: Compile firmware
       id: compile
       run: |
         cd openwrt
+
         echo "Using $(($(nproc) - 1)) cores for compilation"
-        make -j$(($(nproc) - 1)) || make -j2 || make -j1 V=s
+
+        make -j"$(($(nproc) - 1))" || \
+        make -j2 || \
+        make -j1 V=s
+
         echo "status=success" >> "$GITHUB_OUTPUT"
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+
+        grep '^CONFIG_TARGET.*DEVICE.*=y' .config \
+          | sed -r 's/.*DEVICE_(.*)=y/\1/' \
+          > DEVICE_NAME
+
+        if [ -s DEVICE_NAME ]; then
+          echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+        fi
+
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
 
     - name: Check space usage
       if: (!cancelled())
-      run: df -hT
+      run: |
+        df -hT
 
     - name: Upload bin directory
       uses: actions/upload-artifact@v4
@@ -147,12 +263,14 @@ jobs:
         name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
         path: openwrt/bin
 
-    - name: Organize files
+    - name: Organize firmware files
       id: organize
       if: env.UPLOAD_FIRMWARE == 'true' && steps.compile.outputs.status == 'success'
       run: |
         cd openwrt/bin/targets/*/*
+
         rm -rf packages
+
         echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
         echo "status=success" >> "$GITHUB_OUTPUT"
 
@@ -169,9 +287,13 @@ jobs:
       if: env.UPLOAD_RELEASE == 'true' && steps.compile.outputs.status == 'success' && !cancelled()
       run: |
         echo "release_tag=$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
+
         touch release.txt
+
         echo "- Orange Pi Zero 3 (H618) / ImmortalWrt" >> release.txt
-        echo "- 内置 AW859A (UWE5622) Wi-Fi 驱动 + 固件" >> release.txt
+        echo "- AW859A / UWE5622 Wi-Fi driver and firmware included" >> release.txt
+        echo "- PassWall / PassWall2 / mwan3 / ttyd / EasyTier included" >> release.txt
+
         echo "status=success" >> "$GITHUB_OUTPUT"
 
     - name: Upload firmware to release
@@ -184,13 +306,13 @@ jobs:
         body_path: release.txt
         files: ${{ env.FIRMWARE }}/*
 
-    - name: Delete workflow runs
+    - name: Delete old workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
         retain_days: 0
         keep_minimum_runs: 2
 
-    - name: Remove old Releases
+    - name: Remove old releases
       uses: dev-drprasad/delete-older-releases@master
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       with:
